@@ -22,6 +22,9 @@ libusb_device_handle *g_devh = NULL;
 
 static bool usbd_ready = false;
 static bool disconnect_sent = false;
+static bool audio_wanted = false;
+
+void ps4_usb_set_audio_wanted(bool wanted) { audio_wanted = wanted; }
 static SDL_mutex *init_lock = NULL;
 
 static void init_lock_ensure(void) {
@@ -132,6 +135,11 @@ int init_serial(int verbose, const char *preferred_device) {
       SDL_LogError(SDL_LOG_CATEGORY_SYSTEM, "ClaimInterface(%d): %d", iface, rc);
       goto fail;
     }
+  }
+
+  // Audio alt setting BEFORE any bulk traffic (see usbio_prepare_audio).
+  if (audio_wanted && !usbio_prepare_audio()) {
+    SDL_LogError(SDL_LOG_CATEGORY_SYSTEM, "audio interface setup failed; display only");
   }
 
   rc = sceUsbdControlTransfer(g_devh, 0x21, 0x22, ACM_CTRL_DTR | ACM_CTRL_RTS, 0, NULL, 0, 500);

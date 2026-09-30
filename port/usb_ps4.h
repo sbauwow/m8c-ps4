@@ -34,4 +34,8 @@ bool ps4_usbd_ensure_init(void);
 // Safe to call any number of times.
 void ps4_usb_quiesce(void);
 
+// Set from the config before the first init_serial: audio needs its
+// interface configured before any bulk transfer.
+void ps4_usb_set_audio_wanted(bool wanted);
+
 #endif

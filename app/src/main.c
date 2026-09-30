@@ -19,6 +19,7 @@
 #include "slip.h"
 #ifdef PS4
 #include "ps4_shims.h"
+#include "usb_ps4.h"
 #endif
 
 enum state { QUIT, WAIT_FOR_DEVICE, RUN };
@@ -53,6 +54,9 @@ int main(const int argc, char *argv[]) {
   // configfile if present
   config_params_s conf = init_config(config_filename);
   read_config(&conf);
+#ifdef PS4
+  ps4_usb_set_audio_wanted(conf.audio_enabled == 1);
+#endif
 
   // allocate memory for serial buffer
   uint8_t *serial_buf = SDL_malloc(serial_read_size);
@@ -83,7 +87,7 @@ int main(const int argc, char *argv[]) {
 #ifdef PS4
   ps4_log_init(); // SDL_Log -> /data/m8c.log before anything else logs
   SDL_Log("m8c PS4 starting");
-  ps4_stage("BUILD-C6"); // build identity marker
+  ps4_stage("BUILD-C7"); // build identity marker
 #endif
   slip_init(&slip, &slip_descriptor);
 

@@ -470,6 +470,8 @@ static int dump_descriptors(libusb_device *dev) {
   return iso_size;
 }
 
+static void load_overrides(void);
+
 static bool setup_audio_iface(void) {
   libusb_device *dev = sceUsbdGetDevice(g_devh);
   int desc_pkt = dump_descriptors(dev);
@@ -580,7 +582,7 @@ bool usbio_start(bool with_audio) {
   rx_ring->head = rx_ring->tail = rx_ring->size = 0;
   audio_ring->head = audio_ring->tail = audio_ring->size = 0;
 
-  if (with_audio && !setup_audio_iface()) {
+  if (with_audio && !audio_claimed && !setup_audio_iface()) {
     return false;
   }
 
@@ -678,6 +680,14 @@ void usbio_stop(void) {
   free_transfers();
   release_audio_iface();
   ps4_stage("usbio: stopped");
+}
+
+bool usbio_prepare_audio(void) {
+  if (audio_claimed) {
+    return true;
+  }
+  load_overrides();
+  return setup_audio_iface();
 }
 
 bool usbio_active(void) { return running != 0; }

@@ -18,6 +18,12 @@
 // the USB thread. Caller must not touch sceUsbd again until usbio_stop().
 bool usbio_start(bool with_audio);
 
+// Claims the audio interface and selects its streaming alt setting, WITHOUT
+// arming anything. Must run before the first bulk transfer on the device:
+// the alt switch kills the kernel pipes of endpoints already used (C6: every
+// bulk OUT after it hung, while never-used bulk IN worked).
+bool usbio_prepare_audio(void);
+
 // Cancels everything, joins the USB thread, drops the audio alt setting.
 // Idempotent. Queued writes are flushed first (bounded wait).
 void usbio_stop(void);

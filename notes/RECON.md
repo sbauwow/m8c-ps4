@@ -169,3 +169,14 @@ reinstall: /data/m8c_audio.ini (pkt= npkts= nxfers= ev_us=).
   tx_busy stuck and every later message queued forever. C6: timeout 0,
   stall detect -> cancel -> fall back to sync sends on the USB thread;
   `tx=sync` in /data/m8c_audio.ini forces the fallback.
+
+## C6 result (2026-09-30)
+
+- Every async bulk OUT hangs (actual 0) once audio is set up; cancel works
+  (status 3). Bulk IN on 0x83 works. Grid showed boxes: the post-audio 'R'
+  was the first stuck send.
+- Hypothesis (C7): sceUsbd = FreeBSD libusb; SET alt interface tears down the
+  kernel pipes of endpoints already opened, but libusb10 keeps its cached
+  handle. 0x03 was used (sync E/R) BEFORE the alt switch; 0x83 only after.
+  Also explains the old "sync bulk hangs once iso armed". C7 switches iface 3
+  to alt 1 inside init_serial, before any bulk traffic.
