@@ -1,5 +1,5 @@
-// Shared state between the PS4 CDC backend (usb_ps4.c) and the PS4 iso audio
-// backend (usb_audio_ps4.c). Upstream m8c wires these through usb.h +
+// Shared state between the PS4 CDC backend (usb_ps4.c) and the async USB
+// engine (usbio_ps4.c). Upstream m8c wires these through usb.h +
 // `extern libusb_device_handle *devh`; we use one explicit header instead.
 #ifndef USB_PS4_H_
 #define USB_PS4_H_
@@ -28,5 +28,9 @@ extern libusb_device_handle *g_devh;
 
 // Loads libSceUsbd.sprx + sceUsbdInit exactly once; safe from any thread.
 bool ps4_usbd_ensure_init(void);
+
+// Stops the async engine if it runs, sending the M8 'D' through it first.
+// Safe to call any number of times.
+void ps4_usb_quiesce(void);
 
 #endif

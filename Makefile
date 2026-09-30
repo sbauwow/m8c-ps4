@@ -1,7 +1,7 @@
-# m8c PS4 port (v1) — display mirror + DS4 input + USB iso audio.
+# m8c PS4 port — display mirror + DS4 input + USB iso audio.
 # Staged upstream: app/src @ m8c v1.7.10; PS4 backends in port/.
 # Upstream usb.c + usb_audio.c are REPLACED by port/usb_ps4.c +
-# port/usb_audio_ps4.c (sceUsbd); audio.c + serial.c self-exclude via
+# port/usbio_ps4.c (sceUsbd); audio.c + serial.c self-exclude via
 # -DUSE_LIBUSB. TITLE_ID must be [A-Z]{4}[0-9]{5} or BGFT rejects the pkg
 # with CE-32957-6 (learned the hard way).
 
@@ -24,10 +24,9 @@ PORT_DIR    := port
 # Upstream sources minus the libusb backends this port replaces.
 CFILES      := $(filter-out usb.c usb_audio.c, \
                $(notdir $(wildcard $(SRC_DIR)/*.c)))
-CFILES      += usb_ps4.c ps4_shims.c audio_stubs.c
-# audio_native_ps4.c + usb_audio_ps4.c excluded in v1: see notes/RECON.md
-# "Audio campaign status" — module cannot complete iso events; audio is v2.
-# audio_stubs.c satisfies main.c's audio_init/destroy/toggle calls.
+CFILES      += usb_ps4.c ps4_shims.c usbio_ps4.c audio_native_ps4.c
+# Audio is opt-in via audio_enabled in /data/m8c_config.ini; with it off the
+# app never starts usbio_ps4.c and keeps the sync display-only path.
 
 OBJS        := $(addprefix $(INTDIR)/,$(CFILES:.c=.o))
 

@@ -3,7 +3,6 @@
 
 #include "render.h"
 #ifdef PS4
-#include "usb_audio_shared.h"
 #include "ps4_shims.h"
 #endif
 

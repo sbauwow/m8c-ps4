@@ -3,7 +3,8 @@
 // phase-0 probe proved every step of this sequence on 6.72 GoldHEN:
 //   load libSceUsbd.sprx -> init -> open 16c0:048a -> claim 0+1 ->
 //   SET_LINE_STATE -> SET_LINE_ENCODING -> bulk E/R/D/C/K.
-// Iso audio lives in usb_audio_ps4.c.
+// With audio on, usbio_ps4.c takes over all transfers (async); the entry
+// points below dispatch to it while it runs.
 
 #include <SDL.h>
 #include <SDL_thread.h>
@@ -13,13 +14,14 @@
 #include <orbis/libkernel.h>
 
 #include "serial.h"
-#include "usb_audio_shared.h"
 #include "usb_ps4.h"
 #include "ps4_shims.h"
+#include "usbio_ps4.h"
 
 libusb_device_handle *g_devh = NULL;
 
 static bool usbd_ready = false;
+static bool disconnect_sent = false;
 static SDL_mutex *init_lock = NULL;
 
 static void init_lock_ensure(void) {
@@ -52,17 +54,9 @@ bool ps4_usbd_ensure_init(void) {
   return true;
 }
 
-// SYNC bulk transfer. Console-proven matrix:
-//   sync bulk + no iso armed               -> WORKS (display-only build)
-//   sync bulk + iso armed (any gating)     -> HANGS
-//   async bulk submit                      -> ok, but servicing its events
-//                                             deadlocks the module (even
-//                                             single-threaded, alloc(1))
-// So bulk stays sync forever; iso events are only serviced once per frame by
-// the main thread (see render_screen) and audio arming happens before the
-// main loop, with bulk I/O quiescent until then. The remaining risk window is
-// the FIRST sync bulk after audio init (m8c's glitch-avoidance reset) —
-// mitigated by servicing events before it (see audio_init order in main).
+// SYNC bulk transfer, display-only mode. Console-proven: works as long as no
+// iso transfer is armed (with iso armed it hangs), so once audio starts all
+// traffic goes through the async engine instead.
 // The toolchain's libusb.h has no error enum. sceUsbd mirrors libusb's codes
 // as 0x802400xx; accept either spelling of TIMEOUT.
 #define USBD_ERROR_TIMEOUT_LIBUSB (-7)
@@ -89,11 +83,17 @@ static int bulk_sync(int endpoint, unsigned char *buf, int len, unsigned int tim
 }
 
 static int bulk_write(const unsigned char *buf, int len, unsigned int timeout_ms) {
+  if (usbio_active()) {
+    return usbio_write(buf, len);
+  }
   return bulk_sync(EP_OUT, (unsigned char *)buf, len, timeout_ms);
 }
 
 int serial_read(uint8_t *serial_buf, int count) {
-  // m8c's main loop treats <=0 as "idle tick". One sync attempt per call.
+  // m8c's main loop treats 0 as "idle tick", <0 as device lost.
+  if (usbio_active()) {
+    return usbio_read(serial_buf, count);
+  }
   return bulk_sync(EP_IN, (unsigned char *)serial_buf, count, 1);
 }
 
@@ -147,6 +147,7 @@ int init_serial(int verbose, const char *preferred_device) {
     goto fail;
   }
 
+  disconnect_sent = false;
   SDL_Log("M8 opened over sceUsbd");
   return 1;
 
@@ -196,13 +197,26 @@ int enable_and_reset_display() {
   return reset_display();
 }
 
+void ps4_usb_quiesce(void) {
+  if (usbio_active()) {
+    // 'D' goes out through the engine: sync bulk after iso is untrusted.
+    unsigned char buf = 'D';
+    disconnect_sent = usbio_write(&buf, 1) == 1;
+    usbio_stop();
+  }
+}
+
 int disconnect() {
   SDL_Log("Disconnecting M8");
 
-  unsigned char buf = 'D';
-  if (bulk_write(&buf, 1, 5) != 1) {
-    SDL_LogError(SDL_LOG_CATEGORY_SYSTEM, "Error sending disconnect");
-    return -1;
+  ps4_usb_quiesce();
+  if (!disconnect_sent) {
+    unsigned char buf = 'D';
+    if (bulk_write(&buf, 1, 5) != 1) {
+      SDL_LogError(SDL_LOG_CATEGORY_SYSTEM, "Error sending disconnect");
+      return -1;
+    }
+    disconnect_sent = true;
   }
 
   if (g_devh != NULL) {
@@ -216,7 +230,7 @@ int disconnect() {
     g_devh = NULL;
   }
 
-  // Deliberately no sceUsbdExit: the iso-audio backend shares this context and
+  // Deliberately no sceUsbdExit: the async engine shares this context and
   // the probe showed teardown here can wedge the module.
   return 1;
 }

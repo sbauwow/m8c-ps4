@@ -3,66 +3,107 @@
 // return). Raw sceAudioOut, the path proven by the OpenOrbis audio-wav
 // sample on this very console.
 //
-// Flow: the iso capture pump thread pushes M8 PCM (44.1k s16 stereo) into the
-// ring buffer; THIS file owns a small consumer thread that resamples to the
-// PS4's 48 kHz and calls sceAudioOutOutput (blocking — it IS the pacing).
-// The audio_init/audio_destroy/toggle_audio contract is unchanged.
+// The USB engine (usbio_ps4.c) captures M8 PCM (44.1k s16 stereo) into a
+// ring; THIS file owns a consumer thread that resamples to the PS4's 48 kHz
+// and calls sceAudioOutOutput (blocking — it IS the pacing).
 
-#include <errno.h>
-#include <stdlib.h>
 #include <string.h>
 
 #include <SDL.h>
 #include <SDL_thread.h>
 
 #include <orbis/AudioOut.h>
-#include <orbis/_types/audio_out.h>
 #include <orbis/UserService.h>
+#include <orbis/_types/audio_out.h>
 
+#include "audio.h"
 #include "ps4_shims.h"
-#include "ringbuffer.h"
-#include "usb_audio_shared.h"
 #include "usb_ps4.h"
+#include "usbio_ps4.h"
 
+#define IN_RATE 44100
 #define OUT_RATE 48000
 #define OUT_GRANULARITY 256 // frames per sceAudioOutOutput call (~5.3 ms)
-#define RING_BYTES (256 * 1024)
+#define PREBUFFER_BYTES (8 * 1024)
+#define HIGH_WATER_BYTES (64 * 1024) // ~370 ms: clock drift, trim back down
 
 static volatile int audio_running = 0;
 static SDL_Thread *out_thread = NULL;
 static int32_t out_handle = -1;
 
-// Linear resampler state: converts ring contents 44.1k -> 48k.
-// rs_pos counts down per output frame; below zero => consume one input frame.
-static double rs_pos = 0.0;
-static int16_t rs_last_l = 0, rs_last_r = 0;
+// Input frames pulled from the ring in chunks (one lock per chunk).
+static uint8_t in_chunk[1024 * 4];
+static uint32_t in_frames = 0, in_pos = 0;
+
+static bool next_frame(int16_t *l, int16_t *r) {
+  if (in_pos >= in_frames) {
+    uint32_t got = usbio_audio_pop(in_chunk, sizeof(in_chunk));
+    in_frames = got / 4;
+    in_pos = 0;
+    if (in_frames == 0) {
+      return false;
+    }
+  }
+  const uint8_t *f = in_chunk + in_pos * 4;
+  *l = (int16_t)(f[0] | (f[1] << 8));
+  *r = (int16_t)(f[2] | (f[3] << 8));
+  in_pos++;
+  return true;
+}
 
 static int out_thread_fn(void *arg) {
   (void)arg;
   static int16_t frame_buf[OUT_GRANULARITY * 2];
+  const double step = (double)IN_RATE / OUT_RATE;
+  double pos = 1.0; // fractional position between prev and cur
+  int16_t prev_l = 0, prev_r = 0, cur_l = 0, cur_r = 0;
+  int prebuffering = 1;
 
   while (audio_running) {
-    for (int f = 0; f < OUT_GRANULARITY; f++) {
-      rs_pos -= 1.0;
-      while (rs_pos < 0.0) {
-        uint8_t tmp[4];
-        uint32_t got = ring_buffer_pop(audio_ring, tmp, 4);
-        if (got != 4) {
-          // Starved: pad the rest of this buffer with silence and keep the
-          // resampler position where it is.
-          memset(frame_buf + f * 2, 0, (OUT_GRANULARITY - f) * 4);
-          goto emit;
-        }
-        rs_last_l = (int16_t)(tmp[0] | (tmp[1] << 8));
-        rs_last_r = (int16_t)(tmp[2] | (tmp[3] << 8));
-        rs_pos += (double)44100 / OUT_RATE;
-      }
-      frame_buf[f * 2 + 0] = rs_last_l;
-      frame_buf[f * 2 + 1] = rs_last_r;
+    uint32_t level = usbio_audio_level();
+    if (prebuffering && level >= PREBUFFER_BYTES) {
+      prebuffering = 0;
+      ps4_stage_once("audio: first samples playing");
     }
+    if (!prebuffering && level > HIGH_WATER_BYTES) {
+      // Producer clock runs fast relative to ours: drop back to the target.
+      uint8_t scratch[1024];
+      uint32_t excess = level - PREBUFFER_BYTES;
+      while (excess >= 4) {
+        uint32_t got = usbio_audio_pop(scratch, excess < sizeof(scratch) ? excess : sizeof(scratch));
+        if (got == 0) {
+          break;
+        }
+        excess -= got;
+      }
+      in_frames = in_pos = 0;
+    }
+
+    int f = 0;
+    if (!prebuffering) {
+      for (; f < OUT_GRANULARITY; f++) {
+        while (pos >= 1.0) {
+          prev_l = cur_l;
+          prev_r = cur_r;
+          if (!next_frame(&cur_l, &cur_r)) {
+            goto starved;
+          }
+          pos -= 1.0;
+        }
+        frame_buf[f * 2 + 0] = (int16_t)(prev_l + (cur_l - prev_l) * pos);
+        frame_buf[f * 2 + 1] = (int16_t)(prev_r + (cur_r - prev_r) * pos);
+        pos += step;
+      }
+    }
+    goto emit;
+  starved:
+    usbio_note_underrun();
+    prebuffering = 1;
   emit:
-    // Blocking: returns when the PREVIOUS buffer finished playing — the rate
-    // control. s16 stereo is already the wire format here.
+    if (f < OUT_GRANULARITY) {
+      memset(frame_buf + f * 2, 0, (OUT_GRANULARITY - f) * 4);
+    }
+    // Blocking: returns when the PREVIOUS buffer finished playing.
     if (sceAudioOutOutput(out_handle, frame_buf) < 0) {
       ps4_logf("audio: output failed");
       break;
@@ -76,100 +117,62 @@ int audio_init(unsigned int audio_buffer_size, const char *output_device_name) {
   (void)output_device_name;
   ps4_stage("audio: native init");
 
+  if (audio_running) {
+    return 1;
+  }
   if (g_devh == NULL) {
     ps4_logf("audio: no M8 handle");
-    return -1;
+    return 0;
   }
 
-  if (sceAudioOutInit() != 0) {
-    ps4_logf("audio: sceAudioOutInit failed");
-    return -1;
+  int rc = sceAudioOutInit();
+  if (rc != 0) {
+    // Already-initialised on a re-init is fine; Open below is the real test.
+    ps4_logf("audio: sceAudioOutInit -> 0x%08X", rc);
   }
-  ps4_stage("audio: outinit ok");
-
-  OrbisUserServiceUserId user_id = ORBIS_USER_SERVICE_USER_ID_SYSTEM;
-  out_handle = sceAudioOutOpen(user_id, ORBIS_AUDIO_OUT_PORT_TYPE_MAIN, 0, OUT_GRANULARITY,
-                               OUT_RATE, ORBIS_AUDIO_OUT_PARAM_FORMAT_S16_STEREO);
   if (out_handle <= 0) {
-    ps4_logf("audio: sceAudioOutOpen -> %d", out_handle);
-    return -1;
+    out_handle = sceAudioOutOpen(ORBIS_USER_SERVICE_USER_ID_SYSTEM, ORBIS_AUDIO_OUT_PORT_TYPE_MAIN,
+                                 0, OUT_GRANULARITY, OUT_RATE,
+                                 ORBIS_AUDIO_OUT_PARAM_FORMAT_S16_STEREO);
+    if (out_handle <= 0) {
+      ps4_logf("audio: sceAudioOutOpen -> 0x%08X", out_handle);
+      out_handle = -1;
+      return 0;
+    }
   }
   ps4_stage("audio: outopen ok");
 
-  audio_ring = ring_buffer_create(RING_BYTES);
-  rs_pos = 0.0;
-
-  // Iso capture: claim + arm the interface.
-  int rc = sceUsbdClaimInterface(g_devh, AUDIO_IFACE);
-  if (rc < 0) {
-    ps4_logf("audio: claim(4) -> %d", rc);
-    return rc;
+  // From here the USB engine owns sceUsbd; the display path goes async too.
+  if (!usbio_start(true)) {
+    ps4_logf("audio: usbio start failed, staying display-only");
+    return 0;
   }
-  rc = sceUsbdSetInterfaceAltSetting(g_devh, AUDIO_IFACE, AUDIO_ALT_SETTING);
-  if (rc < 0) {
-    ps4_logf("audio: altset(4,1) -> %d", rc);
-    sceUsbdReleaseInterface(g_devh, AUDIO_IFACE);
-    return rc;
-  }
-  ps4_stage("audio: iface armed");
 
-  // Output thread first, so capture data has a consumer immediately.
+  in_frames = in_pos = 0;
   audio_running = 1;
   out_thread = SDL_CreateThread(out_thread_fn, "m8c_audio_out", NULL);
   if (out_thread == NULL) {
     ps4_logf("audio: out thread create failed");
     audio_running = 0;
-    return -1;
-  }
-
-  // Event pump BEFORE arming transfers: once submitted, their completion
-  // callbacks can only fire while someone services sceUsbd events.
-  ps4_stage("audio: pump start");
-  if (start_pump() != 0) {
-    ps4_logf("audio: pump create failed");
-    audio_running = 0;
-    return -1;
-  }
-
-  ps4_stage("audio: arming iso");
-  if (start_iso_stream() != 0) {
-    ps4_logf("audio: iso stream failed");
-    audio_running = 0;
-    SDL_WaitThread(out_thread, NULL);
-    out_thread = NULL;
-    return -1;
+    return 0;
   }
   ps4_stage("audio: running");
   return 1;
 }
 
-int audio_destroy() {
-  if (!audio_running) {
-    return -1;
-  }
-  audio_running = 0;
-
-  teardown_iso_stream();
-
-  if (out_thread != NULL) {
+void audio_destroy() {
+  if (audio_running) {
+    audio_running = 0;
     SDL_WaitThread(out_thread, NULL);
     out_thread = NULL;
   }
-
-  // Probe teardown trap: alt 0 BEFORE release.
-  sceUsbdSetInterfaceAltSetting(g_devh, AUDIO_IFACE, 0);
-  sceUsbdReleaseInterface(g_devh, AUDIO_IFACE);
-
+  // Every main.c call site is followed by (or follows) a disconnect.
+  ps4_usb_quiesce();
   if (out_handle > 0) {
     sceAudioOutClose(out_handle);
     out_handle = -1;
   }
-  if (audio_ring != NULL) {
-    ring_buffer_free(audio_ring);
-    audio_ring = NULL;
-  }
   ps4_logf("audio: closed");
-  return 1;
 }
 
 void toggle_audio(unsigned int audio_buffer_size, const char *output_device_name) {

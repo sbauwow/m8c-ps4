@@ -134,3 +134,18 @@ Test hygiene rules learned:
 - ALWAYS check log mtime vs session start before reading results (stale logs
   burned 10 minutes twice).
 - Crash-loops pollute module state: full reboot before A/B conclusions.
+
+## C4 (2026-09-30): header-mismatch hypothesis + async engine
+
+OpenOrbis Usbd.h disagrees with libusb 1.0 (which sceUsbd clones) in ways
+that explain the "wall" above:
+1. sceUsbdHandleEventsTimeout(int32_t *) — libusb takes struct timeval *
+   (16 B). Old code passed an int32: 12 bytes of stack garbage as timeout
+   => "deadlocks" (huge timeout) and random crashes.
+2. sceUsbdFillIsoTransfer lacks libusb's num_iso_packets arg => callback /
+   user_data / timeout possibly shifted. Now: never call Fill*, set fields.
+3. type=3 (iso) / type=1 (bulk) were wrong: libusb enum is CONTROL=0,
+   ISO=1, BULK=2, INTERRUPT=3.
+port/usbio_ps4.c: one USB thread owns sceUsbd while audio runs; bulk IN/OUT +
+iso all async; logs descriptors, 5 s stats, WATCHDOG lines. Tunables without
+reinstall: /data/m8c_audio.ini (pkt= npkts= nxfers= ev_us=).
