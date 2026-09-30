@@ -180,3 +180,9 @@ reinstall: /data/m8c_audio.ini (pkt= npkts= nxfers= ev_us=).
   handle. 0x03 was used (sync E/R) BEFORE the alt switch; 0x83 only after.
   Also explains the old "sync bulk hangs once iso armed". C7 switches iface 3
   to alt 1 inside init_serial, before any bulk traffic.
+
+## C7 result (2026-09-30): AUDIO + DISPLAY + INPUT ALL WORK
+
+Alt-setting-before-bulk fixed OUT: tx idle, 0 stalls; iso 176.4 KB/s clean,
+0 underruns, ring 6-8 KB, events max 2 ms. Audio heard on the DS4 headphone
+jack — left channel only (open: headset mono? output routing?).
