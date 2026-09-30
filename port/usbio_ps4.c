@@ -72,6 +72,7 @@ static volatile int running = 0;
 static volatile int stopping = 0;
 static volatile int dev_gone = 0;
 static bool audio_claimed = false;
+static int audio_iface = -1; // interface whose audio alt carries EP_ISO_IN
 
 // Only touched by whichever thread currently owns sceUsbd.
 static int outstanding = 0;
@@ -102,6 +103,7 @@ static struct {
   uint32_t iso_xfers, iso_bytes, iso_pk_ok, iso_pk_zero, iso_max_len;
   uint32_t iso_status[8];
   uint32_t iso_xfer_err, audio_drop, underruns, ev_err;
+  uint32_t ev_calls, ev_max_ms, ev_slow; // per window; slow = >= 20 ms
 } st;
 
 static volatile uint32_t usb_beat = 0;
@@ -181,7 +183,8 @@ static void iso_cb(struct libusb_transfer *t) {
   }
   if (t->status != LIBUSB_TRANSFER_COMPLETED) {
     if (st.iso_xfer_err++ < 5) {
-      ps4_logf("usbio: iso xfer status %d", t->status);
+      ps4_logf("usbio: iso xfer status %d len %d, pkt0 status %d len %u", t->status,
+               t->actual_length, t->iso_packet_desc[0].status, t->iso_packet_desc[0].actual_length);
     }
   } else {
     st.iso_xfers++;
@@ -246,7 +249,16 @@ static void service_tx(void) {
 
 static int handle_events(int usec) {
   struct usbd_timeval tv = {0, usec};
+  uint32_t t0 = SDL_GetTicks();
   int rc = sceUsbdHandleEventsTimeout((int32_t *)&tv);
+  uint32_t dt = SDL_GetTicks() - t0;
+  st.ev_calls++;
+  if (dt > st.ev_max_ms) {
+    st.ev_max_ms = dt;
+  }
+  if (dt >= 20) {
+    st.ev_slow++;
+  }
   if (rc < 0 && st.ev_err++ < 5) {
     ps4_logf("usbio: HandleEventsTimeout -> 0x%08X", rc);
   }
@@ -259,19 +271,21 @@ static void log_stats(uint32_t window_ms) {
   ring = audio_ring ? audio_ring->size : 0;
   SDL_UnlockMutex(audio_lock);
   ps4_logf("usbio: rx %uB/%uxf err %u | tx %u err %u drop %u | iso %uxf %uB/s ok %u zero %u "
-           "max %u st[%u %u %u %u %u %u %u] xerr %u | ring %u drop %u under %u | ev_err %u",
+           "max %u st[%u %u %u %u %u %u %u] xerr %u | ring %u drop %u under %u | ev %u calls max %ums "
+           "slow %u err %u | usb in '%s'",
            st.rx_bytes, st.rx_xfers, st.rx_err, st.tx_msgs, st.tx_err, st.tx_drop, st.iso_xfers,
            (uint32_t)((uint64_t)st.iso_bytes * 1000 / (window_ms ? window_ms : 1)), st.iso_pk_ok,
            st.iso_pk_zero, st.iso_max_len, st.iso_status[0], st.iso_status[1], st.iso_status[2],
            st.iso_status[3], st.iso_status[4], st.iso_status[5], st.iso_status[6],
-           st.iso_xfer_err, ring, st.audio_drop, st.underruns, st.ev_err);
+           st.iso_xfer_err, ring, st.audio_drop, st.underruns, st.ev_calls, st.ev_max_ms, st.ev_slow,
+           st.ev_err, (const char *)usb_where);
   // Rate counters are per window; error counters stay cumulative.
   st.iso_bytes = 0;
+  st.ev_calls = st.ev_max_ms = st.ev_slow = 0;
 }
 
 static int usb_thread_fn(void *arg) {
   (void)arg;
-  uint32_t last_stats = SDL_GetTicks();
   ps4_logf("usbio: thread up, %d armed", outstanding);
 
   while (!stopping) {
@@ -280,11 +294,6 @@ static int usb_thread_fn(void *arg) {
     handle_events(ev_us);
     usb_where = "tx";
     service_tx();
-    uint32_t now = SDL_GetTicks();
-    if (now - last_stats >= STATS_EVERY_MS) {
-      log_stats(now - last_stats);
-      last_stats = now;
-    }
   }
 
   // Retire everything. Never call HandleEvents with nothing armed (it
@@ -315,9 +324,15 @@ static int usb_thread_fn(void *arg) {
 static int dog_thread_fn(void *arg) {
   (void)arg;
   int usb_reported = 0, main_reported = 0;
+  uint32_t last_stats = SDL_GetTicks();
   while (running) {
     SDL_Delay(500);
     uint32_t now = SDL_GetTicks();
+    // Logged from here, not the USB thread: a stuck USB thread still reports.
+    if (now - last_stats >= STATS_EVERY_MS) {
+      log_stats(now - last_stats);
+      last_stats = now;
+    }
     if (now - usb_beat > WATCHDOG_STALL_MS) {
       if (!usb_reported) {
         ps4_logf("WATCHDOG: usb thread stuck in '%s' for %ums", (const char *)usb_where,
@@ -390,8 +405,10 @@ static int dump_descriptors(libusb_device *dev) {
         const struct ep_desc *ep = &eps[e];
         ps4_logf("usbio:   ep %02x attr %02x maxpkt 0x%04x interval %d", ep->bEndpointAddress,
                  ep->bmAttributes, ep->wMaxPacketSize, ep->bInterval);
-        if (alt->bInterfaceNumber == AUDIO_IFACE && alt->bAlternateSetting == AUDIO_ALT_SETTING &&
-            ep->bEndpointAddress == EP_ISO_IN) {
+        // Upstream m8c hardcodes interface 4, but on fw 6.5.x EP 0x85 lives
+        // on interface 3 (4 is the host->M8 stream, EP 0x05 + feedback).
+        if (alt->bAlternateSetting == AUDIO_ALT_SETTING && ep->bEndpointAddress == EP_ISO_IN) {
+          audio_iface = alt->bInterfaceNumber;
           iso_size = (ep->wMaxPacketSize & 0x7FF) * (((ep->wMaxPacketSize >> 11) & 3) + 1);
         }
       }
@@ -404,17 +421,21 @@ static int dump_descriptors(libusb_device *dev) {
 static bool setup_audio_iface(void) {
   libusb_device *dev = sceUsbdGetDevice(g_devh);
   int desc_pkt = dump_descriptors(dev);
+  if (audio_iface < 0) {
+    audio_iface = AUDIO_IFACE_FALLBACK;
+  }
+  ps4_logf("usbio: audio capture interface %d", audio_iface);
   int stack_before = sceUsbdGetMaxIsoPacketSize(dev, EP_ISO_IN);
 
-  int rc = sceUsbdClaimInterface(g_devh, AUDIO_IFACE);
+  int rc = sceUsbdClaimInterface(g_devh, audio_iface);
   if (rc < 0) {
-    ps4_logf("usbio: claim(%d) -> 0x%08X", AUDIO_IFACE, rc);
+    ps4_logf("usbio: claim(%d) -> 0x%08X", audio_iface, rc);
     return false;
   }
-  rc = sceUsbdSetInterfaceAltSetting(g_devh, AUDIO_IFACE, AUDIO_ALT_SETTING);
+  rc = sceUsbdSetInterfaceAltSetting(g_devh, audio_iface, AUDIO_ALT_SETTING);
   if (rc < 0) {
-    ps4_logf("usbio: altset(%d,%d) -> 0x%08X", AUDIO_IFACE, AUDIO_ALT_SETTING, rc);
-    sceUsbdReleaseInterface(g_devh, AUDIO_IFACE);
+    ps4_logf("usbio: altset(%d,%d) -> 0x%08X", audio_iface, AUDIO_ALT_SETTING, rc);
+    sceUsbdReleaseInterface(g_devh, audio_iface);
     return false;
   }
   audio_claimed = true;
@@ -431,8 +452,8 @@ static void release_audio_iface(void) {
   if (!audio_claimed) {
     return;
   }
-  sceUsbdSetInterfaceAltSetting(g_devh, AUDIO_IFACE, 0);
-  sceUsbdReleaseInterface(g_devh, AUDIO_IFACE);
+  sceUsbdSetInterfaceAltSetting(g_devh, audio_iface, 0);
+  sceUsbdReleaseInterface(g_devh, audio_iface);
   audio_claimed = false;
 }
 

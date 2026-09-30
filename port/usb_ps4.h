@@ -18,8 +18,9 @@
 #define EP_OUT 0x03
 #define EP_IN 0x83
 
-// M8 UAC2 audio interface
-#define AUDIO_IFACE 4
+// M8 UAC2 audio capture. The interface is read from the descriptors at
+// runtime (3 on fw 6.5.x); this is only the fallback if that fails.
+#define AUDIO_IFACE_FALLBACK 3
 #define AUDIO_ALT_SETTING 1
 #define EP_ISO_IN 0x85
 

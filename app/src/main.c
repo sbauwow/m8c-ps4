@@ -83,7 +83,7 @@ int main(const int argc, char *argv[]) {
 #ifdef PS4
   ps4_log_init(); // SDL_Log -> /data/m8c.log before anything else logs
   SDL_Log("m8c PS4 starting");
-  ps4_stage("BUILD-C4"); // build identity marker
+  ps4_stage("BUILD-C5"); // build identity marker
 #endif
   slip_init(&slip, &slip_descriptor);
 

@@ -149,3 +149,14 @@ that explain the "wall" above:
 port/usbio_ps4.c: one USB thread owns sceUsbd while audio runs; bulk IN/OUT +
 iso all async; logs descriptors, 5 s stats, WATCHDOG lines. Tunables without
 reinstall: /data/m8c_audio.ini (pkt= npkts= nxfers= ev_us=).
+
+## C4 result (2026-09-30)
+
+- Descriptors (fw 6.5.x, high speed): EP 0x85 iso IN is on INTERFACE 3 alt 1
+  (maxpkt 48, interval 2 => 4000 pkt/s, 192 KB/s cap). Interface 4 alt 1 is
+  the host->M8 stream (EP 0x05 + feedback 0x86). Upstream's IFACE_NUM 4 is
+  wrong for this firmware => every iso transfer failed (status 1), and all
+  earlier audio campaigns claimed the wrong interface too. 48 B is correct.
+- USB thread stalled >2 s inside HandleEventsTimeout; M8 overflowed and the
+  full-screen redraw was lost (grid gone, cursor still drawn). C5 times each
+  events call and logs stats from the watchdog thread.
