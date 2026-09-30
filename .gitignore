@@ -1,0 +1,13 @@
+# build outputs
+x64/
+eboot.bin
+pkg.gp4
+*.pkg
+*.bak
+sce_sys/param.sfo
+sce_sys/icon0.png
+/icon0.png
+probe/eboot.bin
+probe/pkg.gp4
+probe/sce_sys/param.sfo
+probe/sce_sys/icon0.png
