@@ -65,6 +65,8 @@ static int iso_pkt = 0; // 0 = pick from the stack/descriptor at start
 static int iso_npkts = 16;
 static int iso_nxfers = 16;
 static int ev_us = 1000;
+static int tx_timeout = 0; // 0 = none; C5's 200 ms send never completed
+static volatile int tx_sync = 0; // 1: blocking bulk OUT from the USB thread
 
 static SDL_Thread *usb_thread = NULL;
 static SDL_Thread *dog_thread = NULL;
@@ -90,6 +92,8 @@ static uint8_t *iso_buf[MAX_ISO_XFERS];
 static struct libusb_transfer *tx_xfr = NULL;
 static uint8_t tx_buf[TX_MSG_MAX];
 static volatile int tx_busy = 0;
+static uint32_t tx_started = 0;
+static int tx_stall_stage = 0; // 0 ok, 1 cancel requested
 
 static struct {
   uint8_t len;
@@ -104,6 +108,7 @@ static struct {
   uint32_t iso_status[8];
   uint32_t iso_xfer_err, audio_drop, underruns, ev_err;
   uint32_t ev_calls, ev_max_ms, ev_slow; // per window; slow = >= 20 ms
+  uint32_t tx_stalls;
 } st;
 
 static volatile uint32_t usb_beat = 0;
@@ -222,8 +227,30 @@ static void iso_cb(struct libusb_transfer *t) {
   }
 }
 
+// An async send that never completes blocks every later message (C5: input
+// lost). Cancel it; if even the cancel never completes, abandon the
+// transfer and fall back to blocking sends on this thread.
+static void check_tx_stall(void) {
+  uint32_t age = SDL_GetTicks() - tx_started;
+  if (tx_stall_stage == 0 && age > 500) {
+    st.tx_stalls++;
+    ps4_logf("usbio: tx stuck %ums: status %d actual %d len %d, cancelling", age, tx_xfr->status,
+             tx_xfr->actual_length, tx_xfr->length);
+    ps4_logf("usbio: tx cancel -> 0x%08X", sceUsbdCancelTransfer(tx_xfr));
+    tx_stall_stage = 1;
+  } else if (tx_stall_stage == 1 && age > 1000) {
+    ps4_logf("usbio: tx cancel never completed; switching to sync sends");
+    tx_xfr = NULL; // leaked on purpose: the module may still own it
+    outstanding--;
+    tx_busy = 0;
+    tx_sync = 1;
+    tx_stall_stage = 0;
+  }
+}
+
 static void service_tx(void) {
   if (tx_busy) {
+    check_tx_stall();
     return;
   }
   SDL_LockMutex(tx_lock);
@@ -237,8 +264,28 @@ static void service_tx(void) {
   tx_count--;
   SDL_UnlockMutex(tx_lock);
 
-  fill_xfer(tx_xfr, EP_OUT, XFER_TYPE_BULK, tx_buf, len, tx_cb, 200);
+  if (tx_sync) {
+    static int logged = 0;
+    int sent = 0;
+    usb_where = "tx-sync";
+    int rc = sceUsbdBulkTransfer(g_devh, EP_OUT, tx_buf, len, &sent, 50);
+    usb_where = "tx";
+    if (!logged) {
+      ps4_logf("usbio: first sync send -> 0x%08X sent %d", rc, sent);
+      logged = 1;
+    }
+    if (rc < 0 || sent != len) {
+      st.tx_err++;
+    } else {
+      st.tx_msgs++;
+    }
+    return;
+  }
+
+  fill_xfer(tx_xfr, EP_OUT, XFER_TYPE_BULK, tx_buf, len, tx_cb, tx_timeout);
   tx_busy = 1;
+  tx_started = SDL_GetTicks();
+  tx_stall_stage = 0;
   if (submit(tx_xfr) < 0) {
     tx_busy = 0;
     st.tx_err++;
@@ -270,10 +317,11 @@ static void log_stats(uint32_t window_ms) {
   SDL_LockMutex(audio_lock);
   ring = audio_ring ? audio_ring->size : 0;
   SDL_UnlockMutex(audio_lock);
-  ps4_logf("usbio: rx %uB/%uxf err %u | tx %u err %u drop %u | iso %uxf %uB/s ok %u zero %u "
+  ps4_logf("usbio: rx %uB/%uxf err %u | tx %u err %u drop %u stalls %u %s | iso %uxf %uB/s ok %u zero %u "
            "max %u st[%u %u %u %u %u %u %u] xerr %u | ring %u drop %u under %u | ev %u calls max %ums "
            "slow %u err %u | usb in '%s'",
-           st.rx_bytes, st.rx_xfers, st.rx_err, st.tx_msgs, st.tx_err, st.tx_drop, st.iso_xfers,
+           st.rx_bytes, st.rx_xfers, st.rx_err, st.tx_msgs, st.tx_err, st.tx_drop, st.tx_stalls,
+           tx_sync ? "sync" : (tx_busy ? "busy" : "idle"), st.iso_xfers,
            (uint32_t)((uint64_t)st.iso_bytes * 1000 / (window_ms ? window_ms : 1)), st.iso_pk_ok,
            st.iso_pk_zero, st.iso_max_len, st.iso_status[0], st.iso_status[1], st.iso_status[2],
            st.iso_status[3], st.iso_status[4], st.iso_status[5], st.iso_status[6],
@@ -309,7 +357,7 @@ static int usb_thread_fn(void *arg) {
       sceUsbdCancelTransfer(iso_xfr[i]);
     }
   }
-  if (tx_busy) {
+  if (tx_busy && tx_xfr != NULL) {
     sceUsbdCancelTransfer(tx_xfr);
   }
   for (int i = 0; outstanding > 0 && i < 500; i++) {
@@ -370,6 +418,10 @@ static void load_overrides(void) {
       iso_nxfers = v;
     } else if (sscanf(line, "ev_us=%d", &v) == 1) {
       ev_us = v;
+    } else if (sscanf(line, "tx_timeout=%d", &v) == 1) {
+      tx_timeout = v;
+    } else if (strncmp(line, "tx=sync", 7) == 0) {
+      tx_sync = 1;
     }
   }
   fclose(f);
@@ -379,8 +431,8 @@ static void load_overrides(void) {
   if (iso_nxfers < 1 || iso_nxfers > MAX_ISO_XFERS) {
     iso_nxfers = 16;
   }
-  ps4_logf("usbio: overrides pkt=%d npkts=%d nxfers=%d ev_us=%d", iso_pkt, iso_npkts,
-           iso_nxfers, ev_us);
+  ps4_logf("usbio: overrides pkt=%d npkts=%d nxfers=%d ev_us=%d tx_timeout=%d tx_sync=%d",
+           iso_pkt, iso_npkts, iso_nxfers, ev_us, tx_timeout, tx_sync);
 }
 
 // Logs every interface/alt/endpoint; returns EP_ISO_IN's size in the audio
@@ -514,6 +566,8 @@ bool usbio_start(bool with_audio) {
   outstanding = 0;
   tx_head = tx_count = 0;
   tx_busy = 0;
+  tx_sync = 0;
+  tx_stall_stage = 0;
   load_overrides();
 
   if (rx_lock == NULL) {

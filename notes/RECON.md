@@ -160,3 +160,12 @@ reinstall: /data/m8c_audio.ini (pkt= npkts= nxfers= ev_us=).
 - USB thread stalled >2 s inside HandleEventsTimeout; M8 overflowed and the
   full-screen redraw was lost (grid gone, cursor still drawn). C5 times each
   events call and logs stats from the watchdog thread.
+
+## C5 result (2026-09-30): AUDIO CAPTURE WORKS
+
+- iso on interface 3: 176,400 B/s steady, 0 packet errors, 0 underruns,
+  ring ~6-8 KB, HandleEventsTimeout max 2 ms (the C4 stall was the bad iface).
+- Input lost: the first async bulk OUT (timeout 200) never called back, so
+  tx_busy stuck and every later message queued forever. C6: timeout 0,
+  stall detect -> cancel -> fall back to sync sends on the USB thread;
+  `tx=sync` in /data/m8c_audio.ini forces the fallback.
