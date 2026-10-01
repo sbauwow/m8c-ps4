@@ -21,6 +21,17 @@ void ps4_stage_once(const char *msg);
 // output function on this SDL2 build, so diagnostics must bypass it.
 void ps4_logf(const char *fmt, ...);
 
+// Shows a system notification (top-right toast).
+void ps4_notify(const char *text);
+
+// Leaves the app and returns to the home screen. Returning from main alone
+// is not a clean exit for a homebrew title. Does not return on success.
+void ps4_exit_to_home(void);
+
+// Current audio output as its audio_device_name value ("Default", "speaker",
+// "both"); implemented in audio_native_ps4.c next to toggle_audio().
+const char *ps4_audio_mode_name(void);
+
 // Replaces SDL_GetPrefPath("", file) on PS4: flat /data/m8c_<file>.
 const char *ps4_pref_path(const char *filename);
 

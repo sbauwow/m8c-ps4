@@ -34,7 +34,10 @@
 #define TX_MSG_MAX 4
 #define MAX_ISO_XFERS 32
 #define MAX_ISO_PKTS 64
-#define RX_RING_BYTES (64 * 1024)
+// 1 MiB: screen-data bursts reach ~650 KB/s while the main thread is inside a
+// 1080p present; on PS5 the old 64 KiB ring could overflow, ring_buffer_push
+// truncates silently and a corrupted SLIP stream forces reset_display.
+#define RX_RING_BYTES (1024 * 1024)
 #define AUDIO_RING_BYTES (256 * 1024)
 #define STATS_EVERY_MS 5000
 #define WATCHDOG_STALL_MS 2000
@@ -107,6 +110,7 @@ static struct {
   uint32_t iso_xfers, iso_bytes, iso_pk_ok, iso_pk_zero, iso_max_len;
   uint32_t iso_status[8];
   uint32_t iso_xfer_err, audio_drop, underruns, ev_err;
+  uint32_t rx_ring_drop; // bytes lost to a full rx ring
   uint32_t ev_calls, ev_max_ms, ev_slow; // per window; slow = >= 20 ms
   uint32_t tx_stalls;
 } st;
@@ -153,6 +157,10 @@ static void rx_cb(struct libusb_transfer *t) {
     if (t->actual_length > 0) {
       st.rx_bytes += t->actual_length;
       SDL_LockMutex(rx_lock);
+      uint32_t free_bytes = rx_ring->max_size - rx_ring->size;
+      if ((uint32_t)t->actual_length > free_bytes) {
+        st.rx_ring_drop += t->actual_length - free_bytes;
+      }
       ring_buffer_push(rx_ring, t->buffer, t->actual_length);
       SDL_UnlockMutex(rx_lock);
     }
@@ -317,10 +325,10 @@ static void log_stats(uint32_t window_ms) {
   SDL_LockMutex(audio_lock);
   ring = audio_ring ? audio_ring->size : 0;
   SDL_UnlockMutex(audio_lock);
-  ps4_logf("usbio: rx %uB/%uxf err %u | tx %u err %u drop %u stalls %u %s | iso %uxf %uB/s ok %u zero %u "
+  ps4_logf("usbio: rx %uB/%uxf err %u ringdrop %u | tx %u err %u drop %u stalls %u %s | iso %uxf %uB/s ok %u zero %u "
            "max %u st[%u %u %u %u %u %u %u] xerr %u | ring %u drop %u under %u | ev %u calls max %ums "
            "slow %u err %u | usb in '%s'",
-           st.rx_bytes, st.rx_xfers, st.rx_err, st.tx_msgs, st.tx_err, st.tx_drop, st.tx_stalls,
+           st.rx_bytes, st.rx_xfers, st.rx_err, st.rx_ring_drop, st.tx_msgs, st.tx_err, st.tx_drop, st.tx_stalls,
            tx_sync ? "sync" : (tx_busy ? "busy" : "idle"), st.iso_xfers,
            (uint32_t)((uint64_t)st.iso_bytes * 1000 / (window_ms ? window_ms : 1)), st.iso_pk_ok,
            st.iso_pk_zero, st.iso_max_len, st.iso_status[0], st.iso_status[1], st.iso_status[2],
@@ -335,6 +343,11 @@ static void log_stats(uint32_t window_ms) {
 static int usb_thread_fn(void *arg) {
   (void)arg;
   ps4_logf("usbio: thread up, %d armed", outstanding);
+  // Rendering burns a core on 1080p software presents; ask for priority so
+  // iso completions are serviced on time. (Refused on PS5 - harmless.)
+  if (SDL_SetThreadPriority(SDL_THREAD_PRIORITY_TIME_CRITICAL) != 0) {
+    ps4_logf("usbio: thread priority: %s", SDL_GetError());
+  }
 
   while (!stopping) {
     usb_beat = SDL_GetTicks();

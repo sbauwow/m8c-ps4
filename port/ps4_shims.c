@@ -11,6 +11,9 @@
 
 #include <SDL.h>
 
+#include <orbis/SystemService.h>
+#include <orbis/libkernel.h>
+
 #include "ps4_shims.h"
 
 static FILE *g_logfile = NULL;
@@ -85,4 +88,25 @@ const char *ps4_pref_path(const char *filename) {
   static char path[512];
   snprintf(path, sizeof(path), "/data/m8c_%s", filename);
   return path;
+}
+
+void ps4_notify(const char *text) {
+  OrbisNotificationRequest req;
+  memset(&req, 0, sizeof(req));
+  req.type = NotificationRequest;
+  req.targetId = -1;
+  strncpy(req.message, text, sizeof(req.message) - 1);
+  sceKernelSendNotificationRequest(0, &req, sizeof(req), 0);
+}
+
+void ps4_exit_to_home(void) {
+  // "exit" is the shell's quit-to-home target for a running app. If it
+  // returns, close our own app slot the way the PS5 port does.
+  int rc = sceSystemServiceLoadExec("exit", NULL);
+  ps4_logf("exit: LoadExec(exit) -> 0x%08X", rc);
+  const int app_id = sceSystemServiceGetAppIdOfBigApp();
+  if (app_id > 0) {
+    rc = sceSystemServiceKillApp(app_id, -1, 0, 0);
+    ps4_logf("exit: KillApp(0x%x) -> 0x%08X", app_id, rc);
+  }
 }

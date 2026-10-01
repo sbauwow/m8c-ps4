@@ -3,6 +3,9 @@
 // return). Raw sceAudioOut, the path proven by the OpenOrbis audio-wav
 // sample on this very console.
 //
+// Kept in step with m8c-ps5's audio_native_ps5.c: only this header block
+// differs (OpenOrbis headers + the compat names below).
+//
 // The USB engine (usbio_ps4.c) captures M8 PCM (44.1k s16 stereo) into a
 // ring; THIS file owns a consumer thread that resamples to the PS4's 48 kHz
 // and calls sceAudioOutOutput (blocking — it IS the pacing).
@@ -15,6 +18,12 @@
 #include <orbis/AudioOut.h>
 #include <orbis/UserService.h>
 #include <orbis/_types/audio_out.h>
+
+// Names the shared backend uses. OpenOrbis has no PADSPK enum value; 4 is the
+// controller-speaker port type on PS4 and PS5 alike.
+#define ORBIS_AUDIO_OUT_PORT_TYPE_PADSPK 4
+typedef OrbisUserServiceUserId SceUserServiceUserId;
+typedef OrbisAudioOutOutputParam SceAudioOutOutputParam;
 
 #include "audio.h"
 #include "ps4_shims.h"
@@ -29,7 +38,25 @@
 
 static volatile int audio_running = 0;
 static SDL_Thread *out_thread = NULL;
-static int32_t out_handle = -1;
+static int32_t out_handle = -1; // TV / system main output
+static int32_t pad_handle = -1; // DualSense speaker (mono)
+
+// Output modes, in toggle order. Names are the audio_device_name values.
+enum { MODE_TV, MODE_SPEAKER, MODE_BOTH, MODE_COUNT };
+static const char *const mode_names[MODE_COUNT] = {"Default", "speaker", "both"};
+static const char *const mode_labels[MODE_COUNT] = {"TV", "controller speaker",
+                                                    "TV + controller speaker"};
+static int cur_mode = MODE_TV;
+
+static int mode_from_name(const char *name) {
+  if (name != NULL && SDL_strcasecmp(name, "speaker") == 0) {
+    return MODE_SPEAKER;
+  }
+  if (name != NULL && SDL_strcasecmp(name, "both") == 0) {
+    return MODE_BOTH;
+  }
+  return MODE_TV;
+}
 
 // Input frames pulled from the ring in chunks (one lock per chunk).
 static uint8_t in_chunk[1024 * 4];
@@ -54,6 +81,7 @@ static bool next_frame(int16_t *l, int16_t *r) {
 static int out_thread_fn(void *arg) {
   (void)arg;
   static int16_t frame_buf[OUT_GRANULARITY * 2];
+  static int16_t mono_buf[OUT_GRANULARITY];
   const double step = (double)IN_RATE / OUT_RATE;
   double pos = 1.0; // fractional position between prev and cur
   int16_t prev_l = 0, prev_r = 0, cur_l = 0, cur_r = 0;
@@ -103,19 +131,59 @@ static int out_thread_fn(void *arg) {
     if (f < OUT_GRANULARITY) {
       memset(frame_buf + f * 2, 0, (OUT_GRANULARITY - f) * 4);
     }
+    if (pad_handle > 0) {
+      for (int i = 0; i < OUT_GRANULARITY; i++) {
+        mono_buf[i] = (int16_t)(((int32_t)frame_buf[i * 2] + frame_buf[i * 2 + 1]) / 2);
+      }
+    }
     // Blocking: returns when the PREVIOUS buffer finished playing.
-    if (sceAudioOutOutput(out_handle, frame_buf) < 0) {
-      ps4_logf("audio: output failed");
+    SceAudioOutOutputParam outs[2];
+    uint32_t n = 0;
+    if (out_handle > 0) {
+      outs[n++] = (SceAudioOutOutputParam){out_handle, frame_buf};
+    }
+    if (pad_handle > 0) {
+      outs[n++] = (SceAudioOutOutputParam){pad_handle, mono_buf};
+    }
+    int32_t orc = n == 1 ? sceAudioOutOutput(outs[0].handle, outs[0].pointer) : sceAudioOutOutputs(outs, n);
+    if (orc < 0) {
+      ps4_logf("audio: output failed 0x%08X", orc);
       break;
     }
   }
   return 0;
 }
 
+// Opens the DualSense speaker for the foreground user. 0 on failure.
+static int open_pad_speaker(void) {
+  sceUserServiceInitialize(NULL); // "already initialised" is fine
+  SceUserServiceUserId uid = -1;
+  int rc = sceUserServiceGetForegroundUser(&uid);
+  if (rc != 0 || uid < 0) {
+    ps4_logf("audio: no foreground user (0x%08X)", rc);
+    return 0;
+  }
+  pad_handle = sceAudioOutOpen(uid, ORBIS_AUDIO_OUT_PORT_TYPE_PADSPK, 0, OUT_GRANULARITY,
+                               OUT_RATE, ORBIS_AUDIO_OUT_PARAM_FORMAT_S16_MONO);
+  if (pad_handle <= 0) {
+    ps4_logf("audio: pad speaker open (uid %d) -> 0x%08X", uid, pad_handle);
+    pad_handle = -1;
+    return 0;
+  }
+  ps4_logf("audio: pad speaker open, uid %d", uid);
+  return 1;
+}
+
+// audio_device_name in the config picks the output: "speaker" = DualSense
+// speaker only, "both" = TV + speaker, anything else ("Default") = TV only.
 int audio_init(unsigned int audio_buffer_size, const char *output_device_name) {
   (void)audio_buffer_size;
-  (void)output_device_name;
   ps4_stage("audio: native init");
+  cur_mode = mode_from_name(output_device_name);
+  const int want_pad = cur_mode != MODE_TV;
+  const int want_main = cur_mode != MODE_SPEAKER;
+  ps4_logf("audio: output '%s' (main %d, pad speaker %d)",
+           output_device_name ? output_device_name : "(null)", want_main, want_pad);
 
   if (audio_running) {
     return 1;
@@ -130,14 +198,19 @@ int audio_init(unsigned int audio_buffer_size, const char *output_device_name) {
     // Already-initialised on a re-init is fine; Open below is the real test.
     ps4_logf("audio: sceAudioOutInit -> 0x%08X", rc);
   }
-  if (out_handle <= 0) {
+  if (want_pad && pad_handle <= 0 && !open_pad_speaker() && !want_main) {
+    return 0; // speaker-only and it failed: nothing to play to
+  }
+  if (want_main && out_handle <= 0) {
     out_handle = sceAudioOutOpen(ORBIS_USER_SERVICE_USER_ID_SYSTEM, ORBIS_AUDIO_OUT_PORT_TYPE_MAIN,
                                  0, OUT_GRANULARITY, OUT_RATE,
                                  ORBIS_AUDIO_OUT_PARAM_FORMAT_S16_STEREO);
     if (out_handle <= 0) {
       ps4_logf("audio: sceAudioOutOpen -> 0x%08X", out_handle);
       out_handle = -1;
-      return 0;
+      if (pad_handle <= 0) {
+        return 0;
+      }
     }
   }
   ps4_stage("audio: outopen ok");
@@ -172,11 +245,59 @@ void audio_destroy() {
     sceAudioOutClose(out_handle);
     out_handle = -1;
   }
+  if (pad_handle > 0) {
+    sceAudioOutClose(pad_handle);
+    pad_handle = -1;
+  }
   ps4_logf("audio: closed");
 }
 
+// Cycles TV -> controller speaker -> both. Only the output ports change; the
+// USB capture keeps running, so the out thread is paused around the swap.
 void toggle_audio(unsigned int audio_buffer_size, const char *output_device_name) {
   (void)audio_buffer_size;
   (void)output_device_name;
-  ps4_logf("audio: toggle not implemented");
+  if (!audio_running) {
+    return;
+  }
+  audio_running = 0;
+  SDL_WaitThread(out_thread, NULL);
+  out_thread = NULL;
+  if (out_handle > 0) {
+    sceAudioOutClose(out_handle);
+    out_handle = -1;
+  }
+  if (pad_handle > 0) {
+    sceAudioOutClose(pad_handle);
+    pad_handle = -1;
+  }
+
+  cur_mode = (cur_mode + 1) % MODE_COUNT;
+  if (cur_mode != MODE_TV && !open_pad_speaker()) {
+    cur_mode = MODE_TV; // no speaker (no foreground user?): fall back to TV
+  }
+  if (cur_mode != MODE_SPEAKER) {
+    out_handle = sceAudioOutOpen(ORBIS_USER_SERVICE_USER_ID_SYSTEM, ORBIS_AUDIO_OUT_PORT_TYPE_MAIN,
+                                 0, OUT_GRANULARITY, OUT_RATE,
+                                 ORBIS_AUDIO_OUT_PARAM_FORMAT_S16_STEREO);
+    if (out_handle <= 0) {
+      ps4_logf("audio: sceAudioOutOpen -> 0x%08X", out_handle);
+      out_handle = -1;
+    }
+  }
+  ps4_logf("audio: output now %s", mode_names[cur_mode]);
+
+  char msg[64];
+  SDL_snprintf(msg, sizeof(msg), "m8c audio: %s", mode_labels[cur_mode]);
+  ps4_notify(msg);
+
+  if (out_handle <= 0 && pad_handle <= 0) {
+    ps4_notify("m8c audio: no output could be opened");
+    return;
+  }
+  in_frames = in_pos = 0;
+  audio_running = 1;
+  out_thread = SDL_CreateThread(out_thread_fn, "m8c_audio_out", NULL);
 }
+
+const char *ps4_audio_mode_name(void) { return mode_names[cur_mode]; }

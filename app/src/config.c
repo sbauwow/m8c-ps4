@@ -6,7 +6,7 @@
 #include <SDL.h>
 #include <assert.h>
 #include <stdio.h>
-#ifdef PS4
+#if defined(PS4) || defined(PS5)
 #include "ps4_shims.h"
 #endif
 
@@ -88,7 +88,7 @@ void write_config(const config_params_s *conf) {
 
   // Open the default config file for writing
   char config_path[1024] = {0};
-#ifdef PS4
+#if defined(PS4) || defined(PS5)
   snprintf(config_path, sizeof(config_path), "%s", ps4_pref_path(conf->filename));
 #else
   snprintf(config_path, sizeof(config_path), "%s%s", SDL_GetPrefPath("", "m8c"), conf->filename);
@@ -194,7 +194,7 @@ void write_config(const config_params_s *conf) {
 void read_config(config_params_s *conf) {
 
   char config_path[1024] = {0};
-#ifdef PS4
+#if defined(PS4) || defined(PS5)
   snprintf(config_path, sizeof(config_path), "%s", ps4_pref_path(conf->filename));
 #else
   snprintf(config_path, sizeof(config_path), "%s%s", SDL_GetPrefPath("", "m8c"), conf->filename);

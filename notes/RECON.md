@@ -186,3 +186,19 @@ reinstall: /data/m8c_audio.ini (pkt= npkts= nxfers= ev_us=).
 Alt-setting-before-bulk fixed OUT: tx idle, 0 stalls; iso 176.4 KB/s clean,
 0 underruns, ring 6-8 KB, events max 2 ms. Audio heard on the DS4 headphone
 jack — left channel only (open: headset mono? output routing?).
+
+## BUILD-C8 (2026-09-30): parity backport from m8c-ps5
+
+app/src is now byte-identical to m8c-ps5 (console hooks go through the
+ps4_* shim names; m8c-ps5 maps them to ps5_*). audio_native_ps4.c differs
+from audio_native_ps5.c only in its header block. Backported:
+- Controller speaker output: audio_device_name = Default | speaker | both
+  (PADSPK port 4, foreground user id, S16 mono; MAIN keeps the system user).
+- Triangle + Share cycles TV -> speaker -> both, with a system notification;
+  the mode is written back to /data/m8c_config.ini.
+- Quit (R3 + Share) -> ps4_exit_to_home: sceSystemServiceLoadExec("exit"),
+  falling back to sceSystemServiceKillApp on our own app id.
+- rx ring 64 KiB -> 1 MiB + ringdrop counter; usb thread priority request.
+- Render timing in the log every 5 s (ps4_logf) + 30 fps present cap.
+UNTESTED ON THE PS4: all of the above. The PADSPK and quit paths are proven
+only on PS5 11.60.

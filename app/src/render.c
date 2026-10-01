@@ -2,8 +2,8 @@
 // Released under the MIT licence, https://opensource.org/licenses/MIT
 
 #include "render.h"
-#ifdef PS4
-#include "ps4_shims.h"
+#if defined(PS4) || defined(PS5)
+#include "ps4_shims.h" // PS5 build: compat redirect to the ps5_ implementations
 #endif
 
 #include <SDL.h>
@@ -46,7 +46,10 @@ static uint8_t dirty = 0;
 // Initializes SDL and creates a renderer and required surfaces
 int initialize_sdl(const int init_fullscreen, const int init_use_gpu) {
 
-#ifdef PS4
+#if defined(PS4) || defined(PS5)
+  // PS5 shares this path: the generic SDL_INIT_EVERYTHING + OpenGL window +
+  // SDL_CreateRenderer branch failed there (black screen). The PS5 SDL 'ps5'
+  // driver presents the window surface on SDL_UpdateWindowSurface, same as PS4.
   // PS4 (znullptr SDL2): no GL/video-driver renderer. Follow the proven
   // OpenOrbis SDL2 sample: plain window -> window surface -> software
   // renderer. SDL_INIT_EVERYTHING + SDL_WINDOW_OPENGL crashes here
@@ -77,7 +80,8 @@ int initialize_sdl(const int init_fullscreen, const int init_use_gpu) {
     win_w = dm.w;
     win_h = dm.h;
   }
-  SDL_Log("window %dx%d (display %dx%d)", win_w, win_h, dm.w, dm.h);
+  SDL_Log("video driver %s, window %dx%d (display %dx%d)", SDL_GetCurrentVideoDriver(), win_w,
+          win_h, dm.w, dm.h);
   win = SDL_CreateWindow("m8c", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, win_w, win_h, 0);
   if (win == NULL) {
     SDL_LogCritical(SDL_LOG_CATEGORY_ERROR, "CreateWindow: %s\n", SDL_GetError());
@@ -352,6 +356,16 @@ void display_keyjazz_overlay(const uint8_t show, const uint8_t base_octave,
 }
 
 void render_screen() {
+#if defined(PS4) || defined(PS5)
+  // Each present is a 1080p software scale + framebuffer copy. Cap at
+  // 30 fps so the main loop keeps draining serial data between presents.
+  static uint32_t last_present = 0;
+  if (dirty && SDL_GetTicks() - last_present < 33) {
+    return; // stays dirty; drawn on a later loop pass
+  }
+  static uint32_t cost_sum = 0, cost_max = 0;
+  const uint32_t t0 = SDL_GetTicks();
+#endif
   if (dirty) {
     dirty = 0;
     // NOTE(PS4): deliberately NO instrumentation in this hot path. The
@@ -373,9 +387,23 @@ void render_screen() {
     SDL_SetRenderTarget(rend, maintexture);
 
     fps++;
+#if defined(PS4) || defined(PS5)
+    last_present = SDL_GetTicks();
+    const uint32_t cost = last_present - t0;
+    cost_sum += cost;
+    if (cost > cost_max) {
+      cost_max = cost;
+    }
+#endif
 
     if (SDL_GetTicks() - ticks_fps > 5000) {
       ticks_fps = SDL_GetTicks();
+#if defined(PS4) || defined(PS5)
+      // ps4_logf, not SDL_Log: SDL_Log never reaches the log file on PS4.
+      ps4_logf("render: %.1f fps, present avg %u ms max %u ms", (float)fps / 5,
+              fps ? cost_sum / fps : 0, cost_max);
+      cost_sum = cost_max = 0;
+#endif
       SDL_LogDebug(SDL_LOG_CATEGORY_VIDEO, "%.1f fps\n", (float)fps / 5);
       fps = 0;
     }

@@ -11,7 +11,7 @@ TITLE_ID    := MBCA00001
 CONTENT_ID  := UP0001-MBCA00001_00-M8CTRACKER000000
 
 LIBS        := -lc -lkernel -lSDL2 -lSceUsbd \
-               -lSceVideoOut -lScePad -lSceUserService -lSceAudioOut -lSceSysmodule
+               -lSceVideoOut -lScePad -lSceUserService -lSceAudioOut -lSceSysmodule -lSceSystemService
 
 LIBMODULES  := $(wildcard sce_module/*)
 

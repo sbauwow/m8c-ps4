@@ -17,9 +17,13 @@
 #include "render.h"
 #include "serial.h"
 #include "slip.h"
-#ifdef PS4
+#if defined(PS4) || defined(PS5)
 #include "ps4_shims.h"
 #include "usb_ps4.h"
+#endif
+#ifdef PS5
+#include "ps4_shims.h" // PS5 build: compat redirect to the ps5_ implementations
+#include "usb_ps4.h"   // PS5 build: compat header over ps5_usbd + usb_ps5.c
 #endif
 
 enum state { QUIT, WAIT_FOR_DEVICE, RUN };
@@ -54,7 +58,7 @@ int main(const int argc, char *argv[]) {
   // configfile if present
   config_params_s conf = init_config(config_filename);
   read_config(&conf);
-#ifdef PS4
+#if defined(PS4) || defined(PS5)
   ps4_usb_set_audio_wanted(conf.audio_enabled == 1);
 #endif
 
@@ -84,10 +88,19 @@ int main(const int argc, char *argv[]) {
 #ifdef SIGQUIT
   signal(SIGQUIT, intHandler);
 #endif
-#ifdef PS4
+#if defined(PS4) || defined(PS5)
   ps4_log_init(); // SDL_Log -> /data/m8c.log before anything else logs
   SDL_Log("m8c PS4 starting");
-  ps4_stage("BUILD-C7"); // build identity marker
+  ps4_stage("BUILD-C8"); // build identity marker
+#endif
+#ifdef PS5
+  const int killed_pid = ps5_kill_previous_instance();
+  ps4_log_init(); // SDL_Log -> /data/m8c.log before anything else logs
+  if (killed_pid) {
+    SDL_Log("killed previous m8c instance, pid %d", killed_pid);
+  }
+  SDL_Log("m8c PS5 starting");
+  ps4_stage("BUILD-C8-PS5"); // build identity marker
 #endif
   slip_init(&slip, &slip_descriptor);
 
@@ -122,27 +135,27 @@ int main(const int argc, char *argv[]) {
 #endif
 
   // main loop begin
-#ifdef PS4
+#if defined(PS4) || defined(PS5)
   ps4_stage("main_loop");
 #endif
   do {
     // try to init serial port
     int port_inited = init_serial(1, preferred_device);
-#ifdef PS4
+#if defined(PS4) || defined(PS5)
     ps4_stage(port_inited == 1 ? "serial_ok" : "serial_absent");
 #endif
     // if port init was successful, try to enable and reset display
     if (port_inited == 1 && enable_and_reset_display() == 1) {
-#ifdef PS4
+#if defined(PS4) || defined(PS5)
       ps4_stage("display_enabled");
 #endif
       // if audio routing is enabled, try to initialize audio devices
       if (conf.audio_enabled == 1) {
-#ifdef PS4
+#if defined(PS4) || defined(PS5)
         ps4_stage("audio_init_enter");
 #endif
         audio_init(conf.audio_buffer_size, conf.audio_device_name);
-#ifdef PS4
+#if defined(PS4) || defined(PS5)
         ps4_stage("audio_init_return");
 #endif
         // if audio is enabled, reset the display for second time to avoid glitches
@@ -260,6 +273,11 @@ int main(const int argc, char *argv[]) {
             break;
           case msg_toggle_audio:
             toggle_audio(conf.audio_buffer_size, conf.audio_device_name);
+#if defined(PS4) || defined(PS5)
+            // Keep the choice for reconnects and the next launch.
+            conf.audio_device_name = ps4_audio_mode_name();
+            write_config(&conf);
+#endif
             break;
           default:
             break;
@@ -296,7 +314,7 @@ int main(const int argc, char *argv[]) {
         } else {
           // zero byte packet, increment counter
           zerobyte_packets++;
-#ifdef PS4
+#if defined(PS4) || defined(PS5)
           ps4_stage_once("run:first_idle");
 #endif
           if (zerobyte_packets > conf.wait_packets) {
@@ -334,6 +352,11 @@ int main(const int argc, char *argv[]) {
   gamecontrollers_close();
   close_renderer();
   close_serial_port();
+#if defined(PS4) || defined(PS5)
+  // M8 and audio are released; hand control back to the home screen. Done
+  // before SDL_Quit, which hung on the PS4 port.
+  ps4_exit_to_home();
+#endif
   SDL_free(serial_buf);
   SDL_Quit();
   return 0;
