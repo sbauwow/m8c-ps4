@@ -9,7 +9,10 @@ CONTENT_ID  := UP0001-MBCB00001_00-USBPROBE00000000
 LIBS        := -lc -lkernel -lSceUsbd
 
 ASSETS      :=
-LIBMODULES  := $(wildcard sce_module/*)
+# Sony runtime modules aren't redistributed here; copied from the
+# OpenOrbis SDL2 sample on first build.
+LIBMODULES  := sce_module/libc.prx sce_module/libSceFios2.prx
+SDK_SAMPLE   = $(TOOLCHAIN)/samples/SDL2
 
 TOOLCHAIN   := $(OO_PS4_TOOLCHAIN)
 INTDIR      := x64/Debug
@@ -61,6 +64,14 @@ eboot.bin: $(OBJS)
 
 $(INTDIR)/main.o: main.c
 	$(CC) $(CFLAGS) -o $@ $<
+
+sce_module/%.prx:
+	@mkdir -p $(@D)
+	cp $(SDK_SAMPLE)/$@ $@
+
+sce_sys/about/right.sprx:
+	@mkdir -p $(@D)
+	cp $(SDK_SAMPLE)/$@ $@
 
 clean:
 	rm -rf $(INTDIR) eboot.bin pkg.gp4 $(CONTENT_ID).pkg sce_sys/param.sfo

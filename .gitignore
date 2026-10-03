@@ -11,3 +11,8 @@ probe/eboot.bin
 probe/pkg.gp4
 probe/sce_sys/param.sfo
 probe/sce_sys/icon0.png
+# Sony modules, copied from the OpenOrbis SDK at build time
+sce_module/
+sce_sys/about/
+probe/sce_module/
+probe/sce_sys/about/

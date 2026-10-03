@@ -13,7 +13,10 @@ CONTENT_ID  := UP0001-MBCA00001_00-M8CTRACKER000000
 LIBS        := -lc -lkernel -lSDL2 -lSceUsbd \
                -lSceVideoOut -lScePad -lSceUserService -lSceAudioOut -lSceSysmodule -lSceSystemService
 
-LIBMODULES  := $(wildcard sce_module/*)
+# Sony runtime modules aren't redistributed here; copied from the
+# OpenOrbis SDL2 sample on first build.
+LIBMODULES  := sce_module/libc.prx sce_module/libSceFios2.prx
+SDK_SAMPLE   = $(TOOLCHAIN)/samples/SDL2
 
 TOOLCHAIN   := $(OO_PS4_TOOLCHAIN)
 INTDIR      := x64/Debug
@@ -83,6 +86,14 @@ $(INTDIR)/%.o: $(SRC_DIR)/%.c
 
 $(INTDIR)/%.o: $(PORT_DIR)/%.c
 	$(CC) $(CFLAGS) -o $@ $<
+
+sce_module/%.prx:
+	@mkdir -p $(@D)
+	cp $(SDK_SAMPLE)/$@ $@
+
+sce_sys/about/right.sprx:
+	@mkdir -p $(@D)
+	cp $(SDK_SAMPLE)/$@ $@
 
 clean:
 	rm -rf $(INTDIR) eboot.bin pkg.gp4 $(CONTENT_ID).pkg sce_sys/param.sfo
