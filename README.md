@@ -112,3 +112,8 @@ More detail on the port, its pitfalls and its history is in `notes/RECON.md`.
 - `probe/`: the pre-port USB probe app.
 - `scripts/`: deploy, PS4 discovery, log fetch, M8 health check.
 - `notes/RECON.md`: porting record.
+
+## License
+
+MIT, see [LICENSE](LICENSE). `app/src/` is upstream m8c under its own MIT license and bundled
+notices ([app/src/LICENSE](app/src/LICENSE)).
