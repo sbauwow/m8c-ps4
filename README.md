@@ -16,14 +16,16 @@ Sister port: [m8c-ps5](https://github.com/sbauwow/m8c-ps5), which shares `app/sr
 ## Build (Linux host)
 
 - OpenOrbis PS4 toolchain at `~/ps4-toolchain/OpenOrbis/PS4Toolchain` (or set `OO_PS4_TOOLCHAIN`).
-- PkgTool needs .NET with invariant globalization plus OpenSSL 1.1. `scripts/deploy.sh` sets the
-  environment.
+- PkgTool needs .NET plus OpenSSL 1.1, expected at
+  `~/ps5-jailbreak/ps4-transfer/pkgtool/openssl11/usr/lib` (or set `OPENSSL11_LIB`). The
+  Makefile exports the rest of the environment PkgTool and `create-fself` need.
 
 ```sh
-scripts/deploy.sh [ps4-ip]
+make                       # build UP0001-MBCA00001_00-M8CTRACKER000000.pkg
+scripts/deploy.sh [ps4-ip] # build if needed, upload and hash-check
 ```
 
-This rebuilds if anything changed, uploads the `.pkg` to `/data/pkg/` over FTP and verifies its
+`deploy.sh` rebuilds if anything changed, uploads the `.pkg` to `/data/pkg/` over FTP and verifies its
 hash. Then install it on the PS4: **Settings → Debug Settings → Game → Package Installer**.
 The **m8c PS4** tile appears on the home screen; launch it like any game.
 

@@ -18,7 +18,14 @@ LIBS        := -lc -lkernel -lSDL2 -lSceUsbd \
 LIBMODULES  := sce_module/libc.prx sce_module/libSceFios2.prx
 SDK_SAMPLE   = $(TOOLCHAIN)/samples/SDL2
 
+# Same defaults scripts/deploy.sh uses, so a bare `make` works too.
+OO_PS4_TOOLCHAIN ?= $(HOME)/ps4-toolchain/OpenOrbis/PS4Toolchain
+export OO_PS4_TOOLCHAIN   # create-fself reads it from the environment
+OPENSSL11_LIB    ?= $(HOME)/ps5-jailbreak/ps4-transfer/pkgtool/openssl11/usr/lib
 TOOLCHAIN   := $(OO_PS4_TOOLCHAIN)
+# PkgTool.Core is .NET: it needs invariant globalization and OpenSSL 1.1.
+export DOTNET_SYSTEM_GLOBALIZATION_INVARIANT := 1
+export LD_LIBRARY_PATH := $(OPENSSL11_LIB)$(if $(LD_LIBRARY_PATH),:$(LD_LIBRARY_PATH))
 INTDIR      := x64/Debug
 
 SRC_DIR     := app/src
