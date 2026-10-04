@@ -35,15 +35,21 @@ Without an IP, the script finds the PS4 by its GoldHEN FTP banner. A PS5 also an
 | M8 key | DualShock 4 |
 |---|---|
 | Arrow keys | D-pad (or left stick) |
-| SHIFT | **Share** (or **L2**) |
-| PLAY | **Options** (or **R2**) |
+| SHIFT | **L1** (after the one-line remap below; the default is Share) |
+| PLAY | **Options** (R2 untested, likely broken like L2) |
 | OPTION | **Circle** |
 | EDIT | **Cross** |
-| Cycle audio output | **Triangle** + Share/L2 |
-| Reset display | **L3** + Share/L2 |
-| **Quit to home screen** | **R3** + Share/L2 |
+| Cycle audio output | **Triangle** + SHIFT |
+| Reset display | **L3** + SHIFT |
+| **Quit to home screen** | **R3** + SHIFT |
 
-Square, L1, R1 and the right stick are unmapped. The PS button only goes to the home screen and
+**Remap SHIFT to L1 first.** The default SHIFT is Share, but GoldHEN takes the Share button for
+its own menu, so it never reaches m8c. The L2 fallback doesn't register either, most likely
+because the trigger-axis numbers in the runtime DS4 mapping (`lefttrigger:a3`, copied from the
+Linux layout) don't match this SDL. Set `gamepad_select=9` in `[gamepad]` of `/data/m8c_config.ini` (see Remapping) and
+relaunch. Verified on console: L1 works as SHIFT, including for Project → LOAD.
+
+Square, R1 and the right stick are unmapped. The PS button only goes to the home screen and
 leaves m8c running.
 
 ### Remapping
@@ -76,7 +82,7 @@ Use `-1` to disable an axis.
 | `speaker` | DualShock 4 speaker only (mono mixdown) |
 | `both` | TV and controller speaker |
 
-Or switch while m8c runs: **Triangle + Share** cycles TV → controller speaker → both. A
+Or switch while m8c runs: **Triangle + SHIFT** cycles TV → controller speaker → both. A
 notification shows the new mode, and the choice is saved to the config.
 
 Known issue: on the DS4 headphone jack, audio has only been heard in the left ear.
