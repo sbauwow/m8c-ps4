@@ -35,7 +35,7 @@ Without an IP, the script finds the PS4 by its GoldHEN FTP banner. A PS5 also an
 | M8 key | DualShock 4 |
 |---|---|
 | Arrow keys | D-pad (or left stick) |
-| SHIFT | **L1** (after the one-line remap below; the default is Share) |
+| SHIFT | **L1** |
 | PLAY | **Options** (R2 untested, likely broken like L2) |
 | OPTION | **Circle** |
 | EDIT | **Cross** |
@@ -43,11 +43,14 @@ Without an IP, the script finds the PS4 by its GoldHEN FTP banner. A PS5 also an
 | Reset display | **L3** + SHIFT |
 | **Quit to home screen** | **R3** + SHIFT |
 
-**Remap SHIFT to L1 first.** The default SHIFT is Share, but GoldHEN takes the Share button for
-its own menu, so it never reaches m8c. The L2 fallback doesn't register either, most likely
-because the trigger-axis numbers in the runtime DS4 mapping (`lefttrigger:a3`, copied from the
-Linux layout) don't match this SDL. Set `gamepad_select=9` in `[gamepad]` of `/data/m8c_config.ini` (see Remapping) and
-relaunch. Verified on console: L1 works as SHIFT, including for Project → LOAD.
+SHIFT is L1, not Share: GoldHEN takes the Share button for its own menu, so it never reaches
+m8c. The L2 fallback doesn't register either, most likely because the trigger-axis numbers in the
+runtime DS4 mapping (`lefttrigger:a3`, copied from the Linux layout) don't match this SDL.
+Verified on console: L1 works as SHIFT, including for Project → LOAD.
+
+An existing `/data/m8c_config.ini` keeps whatever it already has, so a config written by an older
+build still says `gamepad_select=4` (Share). Change it to `9`, or delete the file and let m8c
+write a fresh one.
 
 Square, R1 and the right stick are unmapped. The PS button only goes to the home screen and
 leaves m8c running.
